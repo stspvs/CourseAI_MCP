@@ -5,3 +5,9 @@ plugins {
     alias(libs.plugins.sqldelight) apply false
     alias(libs.plugins.kotlin.jvm) apply false
 }
+
+tasks.register("runMcp") {
+    group = "application"
+    description = "Запуск JVM MCP-сервера (модуль :mcp-server). Не Android/Compose."
+    dependsOn(":mcp-server:run")
+}

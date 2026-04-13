@@ -11,6 +11,21 @@ application {
 group = "ru.courseai.currencywatch"
 version = "0.1.0"
 
+val mcpSdkVersion = libs.versions.mcp.get()
+
+configurations.configureEach {
+    resolutionStrategy {
+        // GET /mcp SSE: 0.11.0 вызывает appendSseHeaders() после commit заголовков (Netty).
+        // Жёстко выравниваем все артефакты MCP на версию из каталога (на случай кэша IDE/Gradle).
+        force(
+            "io.modelcontextprotocol:kotlin-sdk-server:$mcpSdkVersion",
+            "io.modelcontextprotocol:kotlin-sdk-server-jvm:$mcpSdkVersion",
+            "io.modelcontextprotocol:kotlin-sdk-core:$mcpSdkVersion",
+            "io.modelcontextprotocol:kotlin-sdk-core-jvm:$mcpSdkVersion",
+        )
+    }
+}
+
 dependencies {
     implementation(project(":shared"))
     implementation(platform(libs.ktor.bom))
@@ -18,6 +33,10 @@ dependencies {
     implementation(libs.mcp.kotlin.server)
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.server.netty)
+    implementation(libs.ktor.server.content.negotiation)
+    implementation(libs.ktor.server.cors)
+    implementation(libs.ktor.server.sse)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)

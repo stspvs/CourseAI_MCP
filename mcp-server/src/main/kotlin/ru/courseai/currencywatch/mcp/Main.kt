@@ -6,10 +6,17 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.minutes
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import io.ktor.http.HttpMethod
+import io.ktor.server.application.Application
+import io.ktor.server.application.install
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.netty.Netty
+import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.utils.io.streams.asInput
 import kotlinx.io.asSink
 import kotlinx.io.buffered
@@ -24,6 +31,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.StdioServerTransport
+import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
@@ -43,35 +51,47 @@ import org.slf4j.LoggerFactory
 
 private val logger = LoggerFactory.getLogger("ru.courseai.currencywatch.mcp")
 
-fun main(args: Array<String>) = runBlocking {
+private enum class TransportMode {
+    STDIO,
+    HTTP,
+}
+
+private data class LauncherConfig(
+    val transport: TransportMode,
+    val syncInterval: Duration,
+    val httpHost: String,
+    val httpPort: Int,
+    val httpPath: String,
+)
+
+fun main(args: Array<String>) {
     if (args.contains("-h") || args.contains("--help")) {
         printUsage()
         exitProcess(0)
     }
 
-    val syncInterval = parseSyncIntervalOrExit(args)
+    val config = parseLauncherConfigOrExit(args)
 
     val dataDir = File(System.getProperty("user.home"), ".currency-watch")
     dataDir.mkdirs()
     logger.info("Каталог данных и логов: {}", dataDir.absolutePath)
-    logger.info("Интервал синхронизации с ЦБ: {} (задаётся аргументом --sync-interval, по умолчанию PT1H)", syncInterval)
+    logger.info("Интервал синхронизации с ЦБ: {}", config.syncInterval)
+    logger.info("Транспорт MCP: {}", config.transport)
 
     val dbFile = File(dataDir, "currency.db")
     val databaseHelper = createJvmDatabaseHelper(dbFile)
-    val httpClient = createCbrHttpClient().apply {
-        // closed when process exits; keep alive for MCP lifetime
-    }
+    val httpClient = createCbrHttpClient()
     val cbrApi = CbrApiService(httpClient)
     val repository = ExchangeRateRepository(databaseHelper, cbrApi)
 
-    val appScope = CoroutineScope(coroutineContext + SupervisorJob())
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val scheduler = Scheduler(appScope)
-    scheduler.startPeriodic(syncInterval) {
+    scheduler.startPeriodic(config.syncInterval) {
         logger.info("Планировщик: синхронизация с ЦБ (по расписанию)")
         repository.syncAndStore()
         logger.info("Планировщик: синхронизация завершена")
     }
-    launch {
+    appScope.launch {
         logger.info("Первая синхронизация с ЦБ при старте")
         try {
             repository.syncAndStore()
@@ -81,12 +101,13 @@ fun main(args: Array<String>) = runBlocking {
         }
     }
 
-    runMcpStdio(repository)
+    when (config.transport) {
+        TransportMode.STDIO -> runBlocking { runMcpStdio(repository) }
+        TransportMode.HTTP -> runMcpHttp(repository, config)
+    }
 }
 
-private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
-    logger.info("Запуск MCP (stdio). Логи пишутся в файл {} и в stderr.", File(System.getProperty("user.home"), ".currency-watch/mcp-server.log").absolutePath)
-
+private fun buildMcpServer(repository: ExchangeRateRepository): Server {
     val server = Server(
         serverInfo = Implementation(
             name = "currency-watch",
@@ -97,48 +118,73 @@ private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
                 tools = ServerCapabilities.Tools(listChanged = false),
             ),
         ),
+        instructions = """
+            Назначение: курсы валют по данным Центрального банка Российской Федерации (официальные курсы ЦБ РФ).
+            Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ; инструменты не ходят в интернет при каждом запросе — они читают уже загруженные данные.
+
+            Когда вызывать: пользователь спрашивает про курс рубля к доллару/евро/другим валютам, динамику или сравнение за период — используйте инструмент get_currency_summary.
+
+            Инструмент get_currency_summary: агрегаты (среднее, минимум, максимум, изменение) по выбранным валютам за последние N часов. Параметр hours задаёт окно; currencies — опциональный список кодов ISO (USD, EUR, CNY и т.д.); без currencies возвращаются все валюты в окне.
+        """.trimIndent(),
+    ) {
+        addTool(
+            name = "get_currency_summary",
+            description = """
+                Курсы валют ЦБ РФ: агрегированный отчёт (среднее, min, max, изменение за период) по данным из локальной БД за последние N часов.
+                Используйте для вопросов о курсах валют, динамике и сравнении за выбранный период.
+            """.trimIndent(),
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("hours") {
+                        put("type", "integer")
+                        put(
+                            "description",
+                            "Сколько последних часов учитывать (окно для курсов). По умолчанию 24.",
+                        )
+                    }
+                    putJsonObject("currencies") {
+                        put("type", "array")
+                        put(
+                            "description",
+                            "Коды валют ISO 4217 (USD, EUR, CNY, …). Если не указать — вернутся все валюты, попавшие в окно hours.",
+                        )
+                        put(
+                            "items",
+                            buildJsonObject {
+                                put("type", "string")
+                            },
+                        )
+                    }
+                },
+                required = emptyList(),
+            ),
+            toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = true),
+        ) { request ->
+            val args = request.arguments as? JsonObject
+            val hours = args?.get("hours")?.jsonPrimitive?.intOrNull ?: 24
+            val currencies = args?.get("currencies")?.jsonArray?.toStringSet()
+            logger.info("Вызов get_currency_summary: hours={}, currencies={}", hours, currencies)
+            val summaries = repository.getSummary(hours, currencies)
+            val json = Json.encodeToString(summaries)
+            val text = formatSummaryText(summaries, hours)
+            CallToolResult(
+                content = listOf(
+                    TextContent(text = "$text\n\nJSON:\n$json"),
+                ),
+            )
+        }
+    }
+
+    return server
+}
+
+private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
+    logger.info(
+        "Запуск MCP (stdio). Логи пишутся в файл {} и в stderr.",
+        File(System.getProperty("user.home"), ".currency-watch/mcp-server.log").absolutePath,
     )
 
-    server.addTool(
-        name = "get_currency_summary",
-        description = "Агрегированный отчёт по курсам валют ЦБ РФ из локальной БД за последние N часов.",
-        inputSchema = ToolSchema(
-            properties = buildJsonObject {
-                putJsonObject("hours") {
-                    put("type", "integer")
-                    put("description", "Период в часах (по умолчанию 24)")
-                }
-                putJsonObject("currencies") {
-                    put("type", "array")
-                    put(
-                        "description",
-                        "Список буквенных кодов валют (например USD, EUR). Если не задан — все валюты в окне.",
-                    )
-                    put(
-                        "items",
-                        buildJsonObject {
-                            put("type", "string")
-                        },
-                    )
-                }
-            },
-            required = emptyList(),
-        ),
-        toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = true),
-    ) { request ->
-        val args = request.arguments as? JsonObject
-        val hours = args?.get("hours")?.jsonPrimitive?.intOrNull ?: 24
-        val currencies = args?.get("currencies")?.jsonArray?.toStringSet()
-        logger.info("Вызов get_currency_summary: hours={}, currencies={}", hours, currencies)
-        val summaries = repository.getSummary(hours, currencies)
-        val json = Json.encodeToString(summaries)
-        val text = formatSummaryText(summaries, hours)
-        CallToolResult(
-            content = listOf(
-                TextContent(text = "$text\n\nJSON:\n$json"),
-            ),
-        )
-    }
+    val server = buildMcpServer(repository)
 
     val transport = StdioServerTransport(
         inputStream = System.`in`.asInput(),
@@ -151,6 +197,40 @@ private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
         done.complete()
     }
     done.join()
+}
+
+private fun runMcpHttp(repository: ExchangeRateRepository, config: LauncherConfig) {
+    val url = "http://${config.httpHost}:${config.httpPort}${normalizeHttpPath(config.httpPath)}"
+    logger.info("Запуск MCP (Streamable HTTP). Подключайте клиент по адресу: {}", url)
+    logger.info("Логи: {} и stderr.", File(System.getProperty("user.home"), ".currency-watch/mcp-server.log").absolutePath)
+
+    embeddedServer(Netty, host = config.httpHost, port = config.httpPort) {
+        configureStreamableMcp(repository, normalizeHttpPath(config.httpPath))
+    }.start(wait = true)
+}
+
+private fun normalizeHttpPath(path: String): String {
+    val p = path.trim().ifEmpty { "/mcp" }
+    return if (p.startsWith("/")) p else "/$p"
+}
+
+private fun Application.configureStreamableMcp(repository: ExchangeRateRepository, path: String) {
+    // ContentNegotiation + McpJson ставит сам mcpStreamableHttp() — дублировать нельзя (порядок плагинов / SSE).
+    install(CORS) {
+        anyHost()
+        allowMethod(HttpMethod.Options)
+        allowMethod(HttpMethod.Get)
+        allowMethod(HttpMethod.Post)
+        allowMethod(HttpMethod.Delete)
+        allowNonSimpleContentTypes = true
+        allowHeader("Mcp-Session-Id")
+        allowHeader("Mcp-Protocol-Version")
+        exposeHeader("Mcp-Session-Id")
+        exposeHeader("Mcp-Protocol-Version")
+    }
+    mcpStreamableHttp(path = path) {
+        buildMcpServer(repository)
+    }
 }
 
 private fun JsonArray.toStringSet(): Set<String>? {
@@ -172,14 +252,114 @@ private fun printUsage() {
     System.err.println(
         """
         Валютный дозор MCP — использование:
-          --sync-interval=<длительность>   интервал фоновой синхронизации с ЦБ (ISO-8601), по умолчанию PT1H
-                                           примеры: PT30M, PT1H, PT2H, PT15M
-          -h, --help                       эта справка
+          --transport=stdio|http          способ доступа: stdio (Claude Desktop) или HTTP на localhost (по умолчанию stdio)
+          --sync-interval=<длительность>  интервал фоновой синхронизации с ЦБ (ISO-8601), по умолчанию PT1H
+          --http-host=<хост>              только для --transport=http, по умолчанию 127.0.0.1
+          --http-port=<порт>              только для --transport=http, по умолчанию 3000
+          --http-path=<путь>              только для --transport=http, по умолчанию /mcp
+          -h, --help                      эта справка
 
         Примеры:
+          gradlew.bat :mcp-server:run --args="--transport=http --http-port=3000"
           gradlew.bat :mcp-server:run --args="--sync-interval=PT30M"
         """.trimIndent(),
     )
+}
+
+private fun parseLauncherConfigOrExit(args: Array<String>): LauncherConfig {
+    val transport = parseTransport(args)
+    val syncInterval = parseSyncIntervalOrExit(args)
+    val httpHost = parseStringArg(args, "--http-host=", "127.0.0.1") { idx ->
+        if (idx >= 0 && idx + 1 < args.size) args[idx + 1] else null
+    } ?: "127.0.0.1"
+    val httpPort = parseIntArg(args, "--http-port=", 3000) { idx ->
+        if (idx >= 0 && idx + 1 < args.size) args[idx + 1]?.toIntOrNull() else null
+    } ?: 3000
+    val httpPath = parseStringArg(args, "--http-path=", "/mcp") { idx ->
+        if (idx >= 0 && idx + 1 < args.size) args[idx + 1] else null
+    } ?: "/mcp"
+
+    if (transport == TransportMode.HTTP && (httpPort !in 1..65535)) {
+        System.err.println("Ошибка: --http-port должен быть в диапазоне 1–65535")
+        exitProcess(1)
+    }
+
+    return LauncherConfig(
+        transport = transport,
+        syncInterval = syncInterval,
+        httpHost = httpHost,
+        httpPort = httpPort,
+        httpPath = httpPath,
+    )
+}
+
+private fun parseTransport(args: Array<String>): TransportMode {
+    val fromEquals = args.firstOrNull { it.startsWith("--transport=") }?.substringAfter("=", "")?.trim()?.lowercase()
+    if (fromEquals != null) {
+        return when (fromEquals) {
+            "stdio" -> TransportMode.STDIO
+            "http" -> TransportMode.HTTP
+            "" -> {
+                System.err.println("Ошибка: укажите значение --transport=stdio или --transport=http")
+                printUsage()
+                exitProcess(1)
+            }
+            else -> {
+                System.err.println("Ошибка: неизвестный --transport=$fromEquals (ожидается stdio или http)")
+                exitProcess(1)
+            }
+        }
+    }
+    val idx = args.indexOf("--transport")
+    if (idx >= 0) {
+        if (idx + 1 >= args.size) {
+            System.err.println("Ошибка: после --transport укажите stdio или http")
+            printUsage()
+            exitProcess(1)
+        }
+        return when (args[idx + 1].lowercase()) {
+            "stdio" -> TransportMode.STDIO
+            "http" -> TransportMode.HTTP
+            else -> {
+                System.err.println("Ошибка: ожидался stdio или http")
+                exitProcess(1)
+            }
+        }
+    }
+    return TransportMode.STDIO
+}
+
+private fun parseStringArg(
+    args: Array<String>,
+    prefix: String,
+    fallback: String,
+    fromPair: (Int) -> String?,
+): String {
+    val eq = args.firstOrNull { it.startsWith(prefix) }?.substringAfter("=", "")
+    if (eq != null && eq.isNotBlank()) return eq.trim()
+    val idx = args.indexOf(prefix.trimEnd('='))
+    if (idx >= 0) {
+        val v = fromPair(idx)
+        if (v != null && v.isNotBlank()) return v.trim()
+    }
+    return fallback
+}
+
+private fun parseIntArg(
+    args: Array<String>,
+    prefix: String,
+    fallback: Int,
+    fromPair: (Int) -> Int?,
+): Int {
+    val eq = args.firstOrNull { it.startsWith(prefix) }?.substringAfter("=", "")?.toIntOrNull()
+    if (eq != null) return eq
+    val key = prefix.trimEnd('=')
+    val idx = args.indexOf(key)
+    if (idx >= 0) {
+        val v = fromPair(idx)
+        if (v != null) return v
+    }
+    return fallback
 }
 
 private fun parseSyncIntervalOrExit(args: Array<String>): Duration {

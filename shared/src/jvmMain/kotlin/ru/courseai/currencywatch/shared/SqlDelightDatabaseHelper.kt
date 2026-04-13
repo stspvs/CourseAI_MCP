@@ -46,8 +46,11 @@ class SqlDelightDatabaseHelper(
 
 fun createJvmDatabaseHelper(dbFile: File): DatabaseHelper {
     dbFile.parentFile?.mkdirs()
+    val needsCreate = !dbFile.exists() || dbFile.length() == 0L
     val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
-    CurrencyDatabase.Schema.create(driver)
+    if (needsCreate) {
+        CurrencyDatabase.Schema.create(driver)
+    }
     val database = CurrencyDatabase(driver)
     return SqlDelightDatabaseHelper(database)
 }

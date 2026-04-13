@@ -86,6 +86,15 @@ sqldelight {
         create("CurrencyDatabase") {
             packageName.set("ru.courseai.currencywatch.db")
             srcDirs("src/commonMain/sqldelight")
+            verifyMigrations.set(false)
         }
     }
+}
+
+// Проверка миграций через JDBC+native sqlite в отдельном Worker; на части Windows библиотека пишет в C:\Windows → AccessDenied.
+// verifyMigrations=false не отключает задачу verify* в SqlDelight 2.0.x — отключаем явно.
+tasks.matching {
+    it.name.startsWith("verify") && it.name.endsWith("CurrencyDatabaseMigration")
+}.configureEach {
+    enabled = false
 }
