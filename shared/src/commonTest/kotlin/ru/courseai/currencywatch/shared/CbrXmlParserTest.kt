@@ -107,6 +107,34 @@ class CbrXmlParserTest {
     }
 
     @Test
+    fun missingCharCodeSkipsBlock() {
+        val xml = cbrDailyXml(
+            "07.07.2024",
+            """
+            <Valute>
+            <Nominal>1</Nominal>
+            <Value>1,0</Value>
+            </Valute>
+            """.trimIndent(),
+            valuteBlock("Z", 1, "2,0"),
+        )
+        val rows = CbrXmlParser.parseDailyXml(xml, 0L)
+        assertEquals(1, rows.size)
+        assertEquals("Z", rows.single().charCode)
+    }
+
+    @Test
+    fun parsesMultipleValutes() {
+        val xml = cbrDailyXml(
+            "08.08.2024",
+            valuteBlock("USD", 1, "10,0"),
+            valuteBlock("EUR", 1, "20,0"),
+        )
+        val codes = CbrXmlParser.parseDailyXml(xml, 0L).map { it.charCode }.sorted()
+        assertEquals(listOf("EUR", "USD"), codes)
+    }
+
+    @Test
     fun invalidValueSkipsBlock() {
         val xml = cbrDailyXml(
             "06.06.2024",

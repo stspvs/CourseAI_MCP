@@ -27,6 +27,7 @@ configurations.configureEach {
 }
 
 dependencies {
+    testImplementation(kotlin("test"))
     implementation(project(":shared"))
     implementation(platform(libs.ktor.bom))
     implementation(libs.ktor.client.core)

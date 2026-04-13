@@ -19,3 +19,18 @@ SELECT *
 FROM exchange_rate_snapshot
 WHERE fetched_at >= ? AND fetched_at <= ?
 ORDER BY fetched_at ASC;
+
+-- Последняя запись по каждой валюте (макс. fetched_at для char_code)
+selectLatestPerCurrency:
+SELECT e.char_code, e.nominal, e.value_per_unit, e.cbr_date, e.fetched_at
+FROM exchange_rate_snapshot e
+INNER JOIN (
+  SELECT char_code, MAX(fetched_at) AS max_fetched
+  FROM exchange_rate_snapshot
+  GROUP BY char_code
+) t ON e.char_code = t.char_code AND e.fetched_at = t.max_fetched
+ORDER BY e.char_code;
+
+selectMaxFetchedAt:
+SELECT MAX(fetched_at) AS max_fetched
+FROM exchange_rate_snapshot;

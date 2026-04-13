@@ -4,12 +4,10 @@ import java.io.File
 import kotlin.system.exitProcess
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
-import kotlin.time.Duration.Companion.minutes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import io.ktor.http.HttpMethod
 import io.ktor.server.application.Application
@@ -20,9 +18,6 @@ import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.utils.io.streams.asInput
 import kotlinx.io.asSink
 import kotlinx.io.buffered
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -46,10 +41,12 @@ import ru.courseai.currencywatch.shared.ExchangeRateRepository
 import ru.courseai.currencywatch.shared.Scheduler
 import ru.courseai.currencywatch.shared.createCbrHttpClient
 import ru.courseai.currencywatch.shared.createJvmDatabaseHelper
-import ru.courseai.currencywatch.shared.model.CurrencySummary
 import org.slf4j.LoggerFactory
 
 private val logger = LoggerFactory.getLogger("ru.courseai.currencywatch.mcp")
+
+/** Версия сервера — при старте пишется в лог; если в логе нет этой строки, запущена старая сборка. */
+private const val MCP_SERVER_VERSION = "0.1.0"
 
 private enum class TransportMode {
     STDIO,
@@ -74,30 +71,43 @@ fun main(args: Array<String>) {
 
     val dataDir = File(System.getProperty("user.home"), ".currency-watch")
     dataDir.mkdirs()
-    logger.info("Каталог данных и логов: {}", dataDir.absolutePath)
+    logger.info(
+        "Currency-watch MCP v{} | каталог данных: {}",
+        MCP_SERVER_VERSION,
+        dataDir.absolutePath,
+    )
     logger.info("Интервал синхронизации с ЦБ: {}", config.syncInterval)
     logger.info("Транспорт MCP: {}", config.transport)
 
     val dbFile = File(dataDir, "currency.db")
+    logger.info("Файл SQLite: {}", dbFile.absolutePath)
     val databaseHelper = createJvmDatabaseHelper(dbFile)
     val httpClient = createCbrHttpClient()
     val cbrApi = CbrApiService(httpClient)
     val repository = ExchangeRateRepository(databaseHelper, cbrApi)
 
+    runBlocking {
+        logger.info("Первая синхронизация с ЦБ при старте")
+        try {
+            val saved = repository.syncAndStore()
+            logger.info(
+                "Первая синхронизация завершена: в БД сохранено {} строк курсов (0 — нет ответа от ЦБ, пустой XML или ошибка сети/парсинга)",
+                saved,
+            )
+        } catch (e: Exception) {
+            logger.error("Ошибка первой синхронизации", e)
+        }
+    }
+
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val scheduler = Scheduler(appScope)
     scheduler.startPeriodic(config.syncInterval) {
         logger.info("Планировщик: синхронизация с ЦБ (по расписанию)")
-        repository.syncAndStore()
-        logger.info("Планировщик: синхронизация завершена")
-    }
-    appScope.launch {
-        logger.info("Первая синхронизация с ЦБ при старте")
         try {
-            repository.syncAndStore()
-            logger.info("Первая синхронизация завершена")
+            val saved = repository.syncAndStore()
+            logger.info("Планировщик: синхронизация завершена, сохранено {} строк", saved)
         } catch (e: Exception) {
-            logger.error("Ошибка первой синхронизации", e)
+            logger.error("Планировщик: ошибка синхронизации с ЦБ", e)
         }
     }
 
@@ -111,7 +121,7 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
     val server = Server(
         serverInfo = Implementation(
             name = "currency-watch",
-            version = "0.1.0",
+            version = MCP_SERVER_VERSION,
         ),
         options = ServerOptions(
             capabilities = ServerCapabilities(
@@ -122,11 +132,65 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
             Назначение: курсы валют по данным Центрального банка Российской Федерации (официальные курсы ЦБ РФ).
             Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ; инструменты не ходят в интернет при каждом запросе — они читают уже загруженные данные.
 
-            Когда вызывать: пользователь спрашивает про курс рубля к доллару/евро/другим валютам, динамику или сравнение за период — используйте инструмент get_currency_summary.
+            Когда вызывать: актуальный/последний курс по данным ЦБ (на момент последней синхронизации) — get_latest_currency_rates; динамику, среднее или сравнение за период — get_currency_summary.
 
-            Инструмент get_currency_summary: агрегаты (среднее, минимум, максимум, изменение) по выбранным валютам за последние N часов. Параметр hours задаёт окно; currencies — опциональный список кодов ISO (USD, EUR, CNY и т.д.); без currencies возвращаются все валюты в окне.
+            Инструмент get_latest_currency_rates: последний сохранённый курс только по явно перечисленным валютам (параметр currencies обязателен, например ["USD"] или ["USD","EUR"]).
+
+            Инструмент get_currency_summary: агрегаты за последние N часов. Параметр hours — окно; currencies — опционально буквенные коды как в XML ЦБ (USD, EUR, CNY); без currencies — все валюты в окне. Не передавайте русские названия валют в currencies.
         """.trimIndent(),
     ) {
+        addTool(
+            name = "get_latest_currency_rates",
+            description = """
+                Последние (актуальные) курсы валют ЦБ РФ по данным из локальной БД только для указанных кодов: для каждой запрошенной валюты — последняя запись после синхронизации с ЦБ.
+                Используйте, когда нужен текущий курс без статистики за период. Параметр currencies обязателен (хотя бы одна валюта).
+            """.trimIndent(),
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("currencies") {
+                        put("type", "array")
+                        put(
+                            "description",
+                            "Обязательный список кодов ISO 4217 (USD, EUR, CNY, …), минимум один код. Возвращаются только эти валюты.",
+                        )
+                        put(
+                            "items",
+                            buildJsonObject {
+                                put("type", "string")
+                            },
+                        )
+                        put("minItems", 1)
+                    }
+                },
+                required = listOf("currencies"),
+            ),
+            toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = true),
+        ) { request ->
+            val args = request.arguments as? JsonObject
+            val currencies = args?.get("currencies")?.jsonArray?.toCurrencyCodeStringSet()
+            if (currencies.isNullOrEmpty()) {
+                return@addTool CallToolResult(
+                    content = listOf(
+                        TextContent(
+                            text = "Укажите непустой массив currencies с кодами валют (например [\"USD\"] или [\"USD\",\"EUR\"]).",
+                        ),
+                    ),
+                )
+            }
+            logger.info("Инструмент get_latest_currency_rates: currencies={}", currencies)
+            val rates = repository.getLatestRates(currencies)
+            logger.info(
+                "get_latest_currency_rates: ответ — {} записей (0 = в БД нет курсов по запрошенным кодам)",
+                rates.size,
+            )
+            val text = McpSummaryMessages.formatLatestRatesText(rates)
+            CallToolResult(
+                content = listOf(
+                    TextContent(text = text),
+                ),
+            )
+        }
+
         addTool(
             name = "get_currency_summary",
             description = """
@@ -146,7 +210,7 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
                         put("type", "array")
                         put(
                             "description",
-                            "Коды валют ISO 4217 (USD, EUR, CNY, …). Если не указать — вернутся все валюты, попавшие в окно hours.",
+                            "Только буквенные коды как в XML ЦБ (USD, EUR, CNY, …), не названия на русском. Если не указать — сводка по всем валютам в окне.",
                         )
                         put(
                             "items",
@@ -162,14 +226,31 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
         ) { request ->
             val args = request.arguments as? JsonObject
             val hours = args?.get("hours")?.jsonPrimitive?.intOrNull ?: 24
-            val currencies = args?.get("currencies")?.jsonArray?.toStringSet()
-            logger.info("Вызов get_currency_summary: hours={}, currencies={}", hours, currencies)
+            val currencies = args?.get("currencies")?.jsonArray?.toCurrencyCodeStringSet()
+            logger.info("Инструмент get_currency_summary: hours={}, currencies={}", hours, currencies)
             val summaries = repository.getSummary(hours, currencies)
-            val json = Json.encodeToString(summaries)
-            val text = formatSummaryText(summaries, hours)
+            val snapshotsInWindow = repository.snapshotCountInWindow(hours)
+            logger.info(
+                "get_currency_summary: сводок={}, снимков в окне {} ч.={}",
+                summaries.size,
+                hours,
+                snapshotsInWindow,
+            )
+            val currencyFilterApplied = !currencies.isNullOrEmpty()
+            val text = if (summaries.isEmpty()) {
+                formatSummaryEmptyText(
+                    repository = repository,
+                    hours = hours,
+                    currencyFilterApplied = currencyFilterApplied,
+                    snapshotsInWindow = snapshotsInWindow,
+                    requestedCurrencies = currencies,
+                )
+            } else {
+                McpSummaryMessages.formatSummaryText(summaries, hours)
+            }
             CallToolResult(
                 content = listOf(
-                    TextContent(text = "$text\n\nJSON:\n$json"),
+                    TextContent(text = text),
                 ),
             )
         }
@@ -233,19 +314,36 @@ private fun Application.configureStreamableMcp(repository: ExchangeRateRepositor
     }
 }
 
-private fun JsonArray.toStringSet(): Set<String>? {
-    val set = mapNotNull { it.jsonPrimitive.contentOrNull }.toSet()
-    return set.ifEmpty { null }
-}
-
-private fun formatSummaryText(summaries: List<CurrencySummary>, hours: Int): String {
-    if (summaries.isEmpty()) {
-        return "Нет данных за последние $hours ч. Синхронизируйте с ЦБ (планировщик или перезапуск сервера)."
+private suspend fun formatSummaryEmptyText(
+    repository: ExchangeRateRepository,
+    hours: Int,
+    currencyFilterApplied: Boolean,
+    snapshotsInWindow: Int,
+    requestedCurrencies: Set<String>?,
+): String {
+    val totalInWindow = snapshotsInWindow
+    val maxFetchedAt = repository.getMaxFetchedAtMillis()
+    val now = System.currentTimeMillis()
+    logger.info(
+        "get_currency_summary: пустой ответ — снимковВОкне={}, maxFetchedAtMs={}, фильтрПоВалютам={}",
+        totalInWindow,
+        maxFetchedAt,
+        currencyFilterApplied,
+    )
+    if (totalInWindow > 0 && currencyFilterApplied) {
+        val available = repository.distinctCurrencyCodesInWindow(hours)
+        return McpSummaryMessages.emptySummaryCurrencyMismatch(
+            hours = hours,
+            totalInWindow = totalInWindow,
+            requestedCurrencies = requestedCurrencies,
+            availableCodes = available,
+        )
     }
-    val lines = summaries.joinToString("\n") {
-        "${it.charCode}: avg=${"%.4f".format(it.avg)} min=${"%.4f".format(it.min)} max=${"%.4f".format(it.max)} Δ=${"%.4f".format(it.change)} (n=${it.sampleCount})"
+    if (totalInWindow == 0 && maxFetchedAt != null) {
+        val ageHours = (now - maxFetchedAt).coerceAtLeast(0L) / 3_600_000L
+        return McpSummaryMessages.emptySummaryStaleWindow(hours, ageHours)
     }
-    return "Период: $hours ч.\n$lines"
+    return McpSummaryMessages.emptySummaryNoRowsInDb(hours)
 }
 
 private fun printUsage() {
@@ -383,25 +481,11 @@ private fun parseSyncIntervalOrExit(args: Array<String>): Duration {
         return 1.hours
     }
     val trimmed = raw.trim()
-    if (trimmed.isEmpty()) {
-        System.err.println("Ошибка: после --sync-interval нужна длительность, например PT30M")
+    return try {
+        parseAndValidateSyncInterval(trimmed)
+    } catch (e: IllegalArgumentException) {
+        System.err.println("Ошибка: ${e.message}")
         printUsage()
         exitProcess(1)
     }
-    val parsed = try {
-        Duration.parse(trimmed)
-    } catch (_: Exception) {
-        System.err.println("Ошибка: не удалось разобрать --sync-interval=\"$trimmed\" (ожидается ISO-8601, например PT1H или PT30M)")
-        printUsage()
-        exitProcess(1)
-    }
-    if (parsed <= Duration.ZERO) {
-        System.err.println("Ошибка: --sync-interval должен быть положительным")
-        exitProcess(1)
-    }
-    if (parsed < 1.minutes) {
-        System.err.println("Ошибка: минимальный интервал — 1 минута (PT1M)")
-        exitProcess(1)
-    }
-    return parsed
 }

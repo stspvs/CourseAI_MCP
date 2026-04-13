@@ -18,7 +18,7 @@ class ExchangeRateRepositoryTest {
             fetched!!
         }
         val repo = ExchangeRateRepository(db, source)
-        repo.syncAndStore()
+        assertEquals(1, repo.syncAndStore())
         assertEquals(1, db.inserted.size)
         assertEquals("USD", db.inserted.single().charCode)
     }
@@ -27,7 +27,7 @@ class ExchangeRateRepositoryTest {
     fun syncAndStoreSkipsInsertWhenEmpty() = runTest {
         val db = RecordingDatabaseHelper()
         val source = CbrRatesSource { emptyList() }
-        ExchangeRateRepository(db, source).syncAndStore()
+        assertEquals(0, ExchangeRateRepository(db, source).syncAndStore())
         assertTrue(db.inserted.isEmpty())
     }
 
@@ -58,6 +58,30 @@ class ExchangeRateRepositoryTest {
     }
 
     @Test
+    fun distinctCurrencyCodesInWindowSortedUnique() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(
+                snap("USD", 1.0, 3L),
+                snap("EUR", 2.0, 2L),
+                snap("USD", 1.1, 1L),
+            )
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertEquals(listOf("EUR", "USD"), repo.distinctCurrencyCodesInWindow(24))
+    }
+
+    @Test
+    fun getSummaryNormalizesCurrencyCodesToUppercase() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(snap("EUR", 2.0, 2L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val summaries = repo.getSummary(24, setOf("eur"))
+        assertEquals(1, summaries.size)
+        assertEquals("EUR", summaries.single().charCode)
+    }
+
+    @Test
     fun getSummaryNullOrEmptyCurrencySetMeansNoFilter() = runTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("USD", 1.0, 1L), snap("EUR", 2.0, 2L))
@@ -78,9 +102,116 @@ class ExchangeRateRepositoryTest {
     private fun snap(code: String, v: Double, fetched: Long) =
         ExchangeRateSnapshot(code, 1, v, "d", fetched)
 
+    @Test
+    fun getLatestRatesFiltersByCurrencySet() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            latestPerCurrency = listOf(
+                snap("USD", 1.0, 1L),
+                snap("EUR", 2.0, 2L),
+            )
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val latest = repo.getLatestRates(setOf("EUR"))
+        assertEquals(1, latest.size)
+        assertEquals("EUR", latest.single().charCode)
+    }
+
+    @Test
+    fun getLatestRatesNormalizesCurrencyCodesToUppercase() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            latestPerCurrency = listOf(snap("EUR", 2.0, 2L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val latest = repo.getLatestRates(setOf("eur"))
+        assertEquals(1, latest.size)
+        assertEquals("EUR", latest.single().charCode)
+    }
+
+    @Test
+    fun getLatestRatesEmptySetReturnsNothing() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            latestPerCurrency = listOf(snap("USD", 1.0, 1L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertTrue(repo.getLatestRates(emptySet()).isEmpty())
+    }
+
+    @Test
+    fun getSummaryEmptyWhenFilterDoesNotMatchAnyCode() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(snap("USD", 1.0, 1L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertTrue(repo.getSummary(24, setOf("XXX")).isEmpty())
+    }
+
+    @Test
+    fun getLatestRatesReturnsEmptyWhenCodeNotInDb() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            latestPerCurrency = listOf(snap("USD", 1.0, 1L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertTrue(repo.getLatestRates(setOf("EUR")).isEmpty())
+    }
+
+    @Test
+    fun getLatestRatesTrimsAndUppercasesCodes() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            latestPerCurrency = listOf(snap("USD", 5.0, 1L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val r = repo.getLatestRates(setOf(" usd ")).single()
+        assertEquals("USD", r.charCode)
+    }
+
+    @Test
+    fun snapshotCountInWindow() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(snap("A", 1.0, 1L), snap("B", 2.0, 2L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertEquals(2, repo.snapshotCountInWindow(24))
+    }
+
+    @Test
+    fun distinctCurrencyCodesInWindowEmpty() = runTest {
+        val db = RecordingDatabaseHelper()
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertTrue(repo.distinctCurrencyCodesInWindow(24).isEmpty())
+    }
+
+    @Test
+    fun getMaxFetchedAtMillisDelegatesToDatabase() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(snap("USD", 1.0, 500L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertEquals(500L, repo.getMaxFetchedAtMillis())
+    }
+
+    @Test
+    fun syncAndStoreReturnsMultipleRowCount() = runTest {
+        val db = RecordingDatabaseHelper()
+        val source = CbrRatesSource {
+            listOf(row("A", 1, 1.0, "d", 1L), row("B", 1, 2.0, "d", 2L))
+        }
+        assertEquals(2, ExchangeRateRepository(db, source).syncAndStore())
+        assertEquals(2, db.inserted.size)
+    }
+
+    @Test
+    fun getSummaryWhitespaceOnlyCurrencySetActsAsNoFilter() = runTest {
+        val db = RecordingDatabaseHelper().apply {
+            snapshotsToReturn = listOf(snap("USD", 1.0, 1L), snap("EUR", 2.0, 2L))
+        }
+        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        assertEquals(2, repo.getSummary(24, setOf("   ", " ")).size)
+    }
+
     private class RecordingDatabaseHelper : DatabaseHelper {
         val inserted = mutableListOf<ExchangeRateRow>()
         var snapshotsToReturn: List<ExchangeRateSnapshot> = emptyList()
+        var latestPerCurrency: List<ExchangeRateSnapshot> = emptyList()
         var lastFromMillis: Long = -1L
         var lastToMillis: Long = -1L
 
@@ -92,6 +223,15 @@ class ExchangeRateRepositoryTest {
             lastFromMillis = fromMillis
             lastToMillis = toMillis
             return snapshotsToReturn
+        }
+
+        override suspend fun selectLatestPerCurrency(): List<ExchangeRateSnapshot> = latestPerCurrency
+
+        override suspend fun maxFetchedAtMillis(): Long? {
+            val fromSnapshots = snapshotsToReturn.maxOfOrNull { it.fetchedAtMillis }
+            val fromLatest = latestPerCurrency.maxOfOrNull { it.fetchedAtMillis }
+            val fromInserted = inserted.maxOfOrNull { it.fetchedAtMillis }
+            return listOfNotNull(fromSnapshots, fromLatest, fromInserted).maxOrNull()
         }
     }
 }

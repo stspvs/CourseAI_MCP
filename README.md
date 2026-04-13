@@ -115,7 +115,7 @@ gradlew.bat :mcp-server:run --args="--transport=http --http-host=127.0.0.1 --htt
 - `hours` (integer, опционально): окно в часах, по умолчанию 24.
 - `currencies` (массив строк, опционально): коды валют, например `["USD","EUR"]`. Если не задан — все валюты в окне.
 
-Ответ содержит текстовую сводку и JSON с полями `avg`, `min`, `max`, `change`, `sampleCount` по каждой валюте.
+Ответ — текстовая сводка (поля `avg`, `min`, `max`, `change`, `sampleCount` в человекочитаемом виде).
 
 ## Модули
 

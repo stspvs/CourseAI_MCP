@@ -10,6 +10,7 @@ data class ExchangeRateRow(
     val fetchedAtMillis: Long,
 )
 
+@Serializable
 data class ExchangeRateSnapshot(
     val charCode: String,
     val nominal: Int,

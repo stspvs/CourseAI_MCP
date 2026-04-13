@@ -61,6 +61,18 @@ class DataAggregatorTest {
     }
 
     @Test
+    fun singleCurrencyUnsortedInputStillSortedByFetchedTime() {
+        val rows = listOf(
+            snap("CAD", 3.0, 50L),
+            snap("CAD", 1.0, 10L),
+            snap("CAD", 2.0, 30L),
+        )
+        val s = DataAggregator.aggregate(rows).single()
+        assertEquals(2.0, s.change, 1e-9)
+        assertEquals(3, s.sampleCount)
+    }
+
+    @Test
     fun duplicateTimestampsStillAggregated() {
         val rows = listOf(
             snap("X", 5.0, 1L),

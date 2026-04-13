@@ -27,6 +27,8 @@
 
     <logger name="io.ktor" level="WARN"/>
     <logger name="io.modelcontextprotocol" level="INFO"/>
+    <!-- Инструменты MCP и синхронизация с ЦБ -->
+    <logger name="ru.courseai.currencywatch.mcp" level="INFO"/>
 
     <root level="INFO">
         <appender-ref ref="FILE"/>

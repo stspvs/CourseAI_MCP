@@ -50,6 +50,49 @@ class SqlDelightDatabaseHelperTest {
         assertEquals(0, helper.selectSnapshots(t + 1, t + 2).size)
     }
 
+    @Test
+    fun maxFetchedAtMillisNullWhenEmpty() = runTest {
+        val helper = createJvmDatabaseHelper(createTempDbFile())
+        assertEquals(null, helper.maxFetchedAtMillis())
+    }
+
+    @Test
+    fun maxFetchedAtMillisAfterInsert() = runTest {
+        val helper = createJvmDatabaseHelper(createTempDbFile())
+        val t = 9_999_888L
+        helper.insertSnapshots(listOf(row("USD", 1.0, t), row("EUR", 2.0, t - 1)))
+        assertEquals(t, helper.maxFetchedAtMillis())
+    }
+
+    @Test
+    fun selectLatestPerCurrencyPicksMaxFetched() = runTest {
+        val helper = createJvmDatabaseHelper(createTempDbFile())
+        helper.insertSnapshots(
+            listOf(
+                row("USD", 10.0, 100L),
+                row("USD", 11.0, 300L),
+                row("USD", 12.0, 200L),
+            ),
+        )
+        val latest = helper.selectLatestPerCurrency().single()
+        assertEquals("USD", latest.charCode)
+        assertEquals(11.0, latest.valuePerUnit, 1e-9)
+        assertEquals(300L, latest.fetchedAtMillis)
+    }
+
+    @Test
+    fun selectLatestPerCurrencyMultipleCodes() = runTest {
+        val helper = createJvmDatabaseHelper(createTempDbFile())
+        helper.insertSnapshots(
+            listOf(
+                row("AAA", 1.0, 10L),
+                row("BBB", 2.0, 20L),
+            ),
+        )
+        val codes = helper.selectLatestPerCurrency().map { it.charCode }.sorted()
+        assertEquals(listOf("AAA", "BBB"), codes)
+    }
+
     private fun createTempDbFile(): File {
         val f = File.createTempFile("currency-test-", ".db")
         tempFiles.add(f)

@@ -34,6 +34,25 @@ class SqlDelightDatabaseHelper(
                 .map { it.toDomain() }
         }
 
+    override suspend fun selectLatestPerCurrency(): List<ExchangeRateSnapshot> =
+        withContext(Dispatchers.IO) {
+            database.exchangeRatesQueries.selectLatestPerCurrency()
+                .executeAsList()
+                .map { row ->
+                    ExchangeRateSnapshot(
+                        charCode = row.char_code,
+                        nominal = row.nominal.toInt(),
+                        valuePerUnit = row.value_per_unit,
+                        cbrDate = row.cbr_date,
+                        fetchedAtMillis = row.fetched_at,
+                    )
+                }
+        }
+
+    override suspend fun maxFetchedAtMillis(): Long? = withContext(Dispatchers.IO) {
+        database.exchangeRatesQueries.selectMaxFetchedAt().executeAsOneOrNull()?.max_fetched
+    }
+
     private fun Exchange_rate_snapshot.toDomain(): ExchangeRateSnapshot =
         ExchangeRateSnapshot(
             charCode = char_code,
