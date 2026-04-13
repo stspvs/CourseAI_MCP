@@ -1,5 +1,6 @@
 package ru.courseai.currencywatch.mcp
 
+import kotlinx.datetime.LocalDate
 import ru.courseai.currencywatch.shared.model.CurrencySummary
 import ru.courseai.currencywatch.shared.model.ExchangeRateSnapshot
 
@@ -17,6 +18,26 @@ internal object McpSummaryMessages {
         }
         return "Последние курсы по валютам:\n$lines"
     }
+
+    fun formatRatesOnDateText(requestedDate: LocalDate, rates: List<ExchangeRateSnapshot>): String {
+        if (rates.isEmpty()) {
+            return emptyRatesOnDateText(requestedDate)
+        }
+        val cbrDateHeader = rates.firstOrNull()?.cbrDate?.takeIf { it.isNotBlank() }
+        val header = buildString {
+            append("Курсы на дату запроса $requestedDate (запрос к API ЦБ при вызове инструмента, не из локальной БД).\n")
+            if (cbrDateHeader != null) {
+                append("Дата в ответе ЦБ (атрибут Date в XML): $cbrDateHeader\n")
+            }
+        }
+        val lines = rates.joinToString("\n") {
+            "${it.charCode}: ${it.valuePerUnit} RUB за ${it.nominal} ед., дата ЦБ ${it.cbrDate}, загружено (epoch ms)=${it.fetchedAtMillis}"
+        }
+        return header + lines
+    }
+
+    fun emptyRatesOnDateText(requestedDate: LocalDate): String =
+        "Не удалось получить курсы на дату $requestedDate: пустой ответ ЦБ, нет данных в XML после фильтра по кодам валют или ошибка сети/парсинга. Укажите коды как в XML ЦБ (USD, EUR, …), проверьте доступ к https://www.cbr.ru/scripts/XML_daily.asp и что дата не в будущем. В выходные и праздники ЦБ может вернуть курс на ближайший рабочий день — смотрите поле «дата ЦБ» в ответе при успешной загрузке."
 
     fun formatSummaryText(summaries: List<CurrencySummary>, hours: Int): String {
         val lines = summaries.joinToString("\n") {

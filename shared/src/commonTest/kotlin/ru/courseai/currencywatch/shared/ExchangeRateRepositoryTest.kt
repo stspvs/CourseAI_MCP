@@ -1,6 +1,7 @@
 package ru.courseai.currencywatch.shared
 
 import kotlinx.coroutines.test.runTest
+import kotlinx.datetime.LocalDate
 import ru.courseai.currencywatch.shared.model.ExchangeRateRow
 import ru.courseai.currencywatch.shared.model.ExchangeRateSnapshot
 import kotlin.test.Test
@@ -12,11 +13,11 @@ class ExchangeRateRepositoryTest {
     @Test
     fun syncAndStoreInsertsWhenNonEmpty() = runTest {
         val db = RecordingDatabaseHelper()
-        var fetched: List<ExchangeRateRow>? = null
-        val source = CbrRatesSource {
-            fetched = listOf(row("USD", 1, 1.0, "d", 1L))
-            fetched!!
-        }
+        val source = cbrSource(
+            fetchToday = {
+                listOf(row("USD", 1, 1.0, "d", 1L))
+            },
+        )
         val repo = ExchangeRateRepository(db, source)
         assertEquals(1, repo.syncAndStore())
         assertEquals(1, db.inserted.size)
@@ -26,7 +27,7 @@ class ExchangeRateRepositoryTest {
     @Test
     fun syncAndStoreSkipsInsertWhenEmpty() = runTest {
         val db = RecordingDatabaseHelper()
-        val source = CbrRatesSource { emptyList() }
+        val source = cbrSource()
         assertEquals(0, ExchangeRateRepository(db, source).syncAndStore())
         assertTrue(db.inserted.isEmpty())
     }
@@ -38,7 +39,7 @@ class ExchangeRateRepositoryTest {
                 snap("USD", 10.0, 1_000L),
             )
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         repo.getSummary(hours = 48, currencies = null)
         assertEquals(48L * 3_600_000L, db.lastToMillis - db.lastFromMillis)
     }
@@ -51,7 +52,7 @@ class ExchangeRateRepositoryTest {
                 snap("EUR", 2.0, 2L),
             )
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         val summaries = repo.getSummary(24, setOf("EUR"))
         assertEquals(1, summaries.size)
         assertEquals("EUR", summaries.single().charCode)
@@ -66,7 +67,7 @@ class ExchangeRateRepositoryTest {
                 snap("USD", 1.1, 1L),
             )
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertEquals(listOf("EUR", "USD"), repo.distinctCurrencyCodesInWindow(24))
     }
 
@@ -75,7 +76,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("EUR", 2.0, 2L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         val summaries = repo.getSummary(24, setOf("eur"))
         assertEquals(1, summaries.size)
         assertEquals("EUR", summaries.single().charCode)
@@ -86,7 +87,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("USD", 1.0, 1L), snap("EUR", 2.0, 2L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertEquals(2, repo.getSummary(24, null).size)
         assertEquals(2, repo.getSummary(24, emptySet()).size)
     }
@@ -110,7 +111,7 @@ class ExchangeRateRepositoryTest {
                 snap("EUR", 2.0, 2L),
             )
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         val latest = repo.getLatestRates(setOf("EUR"))
         assertEquals(1, latest.size)
         assertEquals("EUR", latest.single().charCode)
@@ -121,7 +122,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             latestPerCurrency = listOf(snap("EUR", 2.0, 2L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         val latest = repo.getLatestRates(setOf("eur"))
         assertEquals(1, latest.size)
         assertEquals("EUR", latest.single().charCode)
@@ -132,7 +133,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             latestPerCurrency = listOf(snap("USD", 1.0, 1L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertTrue(repo.getLatestRates(emptySet()).isEmpty())
     }
 
@@ -141,7 +142,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("USD", 1.0, 1L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertTrue(repo.getSummary(24, setOf("XXX")).isEmpty())
     }
 
@@ -150,7 +151,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             latestPerCurrency = listOf(snap("USD", 1.0, 1L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertTrue(repo.getLatestRates(setOf("EUR")).isEmpty())
     }
 
@@ -159,7 +160,7 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             latestPerCurrency = listOf(snap("USD", 5.0, 1L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         val r = repo.getLatestRates(setOf(" usd ")).single()
         assertEquals("USD", r.charCode)
     }
@@ -169,14 +170,14 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("A", 1.0, 1L), snap("B", 2.0, 2L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertEquals(2, repo.snapshotCountInWindow(24))
     }
 
     @Test
     fun distinctCurrencyCodesInWindowEmpty() = runTest {
         val db = RecordingDatabaseHelper()
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertTrue(repo.distinctCurrencyCodesInWindow(24).isEmpty())
     }
 
@@ -185,16 +186,18 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("USD", 1.0, 500L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertEquals(500L, repo.getMaxFetchedAtMillis())
     }
 
     @Test
     fun syncAndStoreReturnsMultipleRowCount() = runTest {
         val db = RecordingDatabaseHelper()
-        val source = CbrRatesSource {
-            listOf(row("A", 1, 1.0, "d", 1L), row("B", 1, 2.0, "d", 2L))
-        }
+        val source = cbrSource(
+            fetchToday = {
+                listOf(row("A", 1, 1.0, "d", 1L), row("B", 1, 2.0, "d", 2L))
+            },
+        )
         assertEquals(2, ExchangeRateRepository(db, source).syncAndStore())
         assertEquals(2, db.inserted.size)
     }
@@ -204,9 +207,82 @@ class ExchangeRateRepositoryTest {
         val db = RecordingDatabaseHelper().apply {
             snapshotsToReturn = listOf(snap("USD", 1.0, 1L), snap("EUR", 2.0, 2L))
         }
-        val repo = ExchangeRateRepository(db, CbrRatesSource { emptyList() })
+        val repo = ExchangeRateRepository(db, cbrSource())
         assertEquals(2, repo.getSummary(24, setOf("   ", " ")).size)
     }
+
+    @Test
+    fun getRatesForDateFiltersByCurrency() = runTest {
+        val db = RecordingDatabaseHelper()
+        val d = LocalDate(2024, 6, 1)
+        val source = cbrSource(
+            fetchDate = { date ->
+                assertEquals(d, date)
+                listOf(
+                    row("USD", 1, 90.0, "01.06.2024", 1L),
+                    row("EUR", 1, 100.0, "01.06.2024", 1L),
+                )
+            },
+        )
+        val repo = ExchangeRateRepository(db, source)
+        val rates = repo.getRatesForDate(setOf("USD"), d)
+        assertEquals(1, rates.size)
+        assertEquals("USD", rates.single().charCode)
+        assertEquals(90.0, rates.single().valuePerUnit)
+    }
+
+    @Test
+    fun getRatesForDateNormalizesCurrencyCodes() = runTest {
+        val db = RecordingDatabaseHelper()
+        val d = LocalDate(2024, 1, 15)
+        val source = cbrSource(
+            fetchDate = {
+                listOf(row("EUR", 1, 50.0, "15.01.2024", 99L))
+            },
+        )
+        val repo = ExchangeRateRepository(db, source)
+        val rates = repo.getRatesForDate(setOf("eur"), d)
+        assertEquals("EUR", rates.single().charCode)
+    }
+
+    @Test
+    fun getRatesForDateEmptyCurrenciesReturnsEmpty() = runTest {
+        val db = RecordingDatabaseHelper()
+        val source = cbrSource(
+            fetchDate = { listOf(row("USD", 1, 1.0, "d", 1L)) },
+        )
+        val repo = ExchangeRateRepository(db, source)
+        assertTrue(repo.getRatesForDate(emptySet(), LocalDate(2024, 1, 1)).isEmpty())
+    }
+
+    @Test
+    fun getRatesForDateReturnsEmptyWhenSourceEmpty() = runTest {
+        val db = RecordingDatabaseHelper()
+        val repo = ExchangeRateRepository(db, cbrSource())
+        assertTrue(repo.getRatesForDate(setOf("USD"), LocalDate(2024, 1, 1)).isEmpty())
+    }
+
+    @Test
+    fun getRatesForDateReturnsEmptyWhenNoMatchingCurrencyAfterFilter() = runTest {
+        val db = RecordingDatabaseHelper()
+        val source = cbrSource(
+            fetchDate = {
+                listOf(row("USD", 1, 90.0, "01.06.2024", 1L))
+            },
+        )
+        val repo = ExchangeRateRepository(db, source)
+        assertTrue(repo.getRatesForDate(setOf("XXX"), LocalDate(2024, 6, 1)).isEmpty())
+    }
+
+    private fun cbrSource(
+        fetchToday: suspend () -> List<ExchangeRateRow> = { emptyList() },
+        fetchDate: suspend (LocalDate) -> List<ExchangeRateRow> = { emptyList() },
+    ): CbrRatesSource =
+        object : CbrRatesSource {
+            override suspend fun fetchTodayRates(): List<ExchangeRateRow> = fetchToday()
+
+            override suspend fun fetchRatesForDate(date: LocalDate): List<ExchangeRateRow> = fetchDate(date)
+        }
 
     private class RecordingDatabaseHelper : DatabaseHelper {
         val inserted = mutableListOf<ExchangeRateRow>()

@@ -1,6 +1,7 @@
 package ru.courseai.currencywatch.shared
 
 import kotlinx.datetime.Clock
+import kotlinx.datetime.LocalDate
 import ru.courseai.currencywatch.shared.model.CurrencySummary
 import ru.courseai.currencywatch.shared.model.ExchangeRateSnapshot
 
@@ -43,6 +44,25 @@ class ExchangeRateRepository(
         val normalized = normalizeCurrencyFilter(currencies) ?: return emptyList()
         val rows = databaseHelper.selectLatestPerCurrency()
         return rows.filter { it.charCode in normalized }
+    }
+
+    /** Курсы на календарную дату по данным ЦБ (запрос к API источника, не из локальной БД). */
+    suspend fun getRatesForDate(currencies: Set<String>, date: LocalDate): List<ExchangeRateSnapshot> {
+        if (currencies.isEmpty()) return emptyList()
+        val normalized = normalizeCurrencyFilter(currencies) ?: return emptyList()
+        val rows = cbrRatesSource.fetchRatesForDate(date)
+        if (rows.isEmpty()) return emptyList()
+        return rows
+            .filter { it.charCode in normalized }
+            .map {
+                ExchangeRateSnapshot(
+                    charCode = it.charCode,
+                    nominal = it.nominal,
+                    valuePerUnit = it.valuePerUnit,
+                    cbrDate = it.cbrDate,
+                    fetchedAtMillis = it.fetchedAtMillis,
+                )
+            }
     }
 
     private suspend fun selectSnapshotsInWindow(hours: Int): List<ExchangeRateSnapshot> {

@@ -1,5 +1,6 @@
 package ru.courseai.currencywatch.mcp
 
+import kotlinx.datetime.LocalDate
 import ru.courseai.currencywatch.shared.model.CurrencySummary
 import ru.courseai.currencywatch.shared.model.ExchangeRateSnapshot
 import kotlin.test.Test
@@ -74,6 +75,34 @@ class McpSummaryMessagesTest {
     @Test
     fun emptySummaryNoRowsInDb() {
         val msg = McpSummaryMessages.emptySummaryNoRowsInDb(24)
+        assertTrue(msg.contains("XML_daily.asp"))
+    }
+
+    @Test
+    fun formatRatesOnDateTextWithRows() {
+        val d = LocalDate(2024, 6, 1)
+        val t = McpSummaryMessages.formatRatesOnDateText(
+            d,
+            listOf(
+                ExchangeRateSnapshot("USD", 1, 90.0, "01.06.2024", 1L),
+            ),
+        )
+        assertTrue(t.contains("2024-06-01"))
+        assertTrue(t.contains("API ЦБ"))
+        assertTrue(t.contains("01.06.2024"))
+        assertTrue(t.contains("USD"))
+    }
+
+    @Test
+    fun formatRatesOnDateTextEmpty() {
+        val msg = McpSummaryMessages.formatRatesOnDateText(LocalDate(2020, 1, 1), emptyList())
+        assertTrue(msg.contains("Не удалось получить"))
+    }
+
+    @Test
+    fun emptyRatesOnDateTextStandalone() {
+        val msg = McpSummaryMessages.emptyRatesOnDateText(LocalDate(2010, 5, 5))
+        assertTrue(msg.contains("2010-05-05"))
         assertTrue(msg.contains("XML_daily.asp"))
     }
 }

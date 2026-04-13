@@ -55,6 +55,13 @@ kotlin {
             implementation(libs.slf4j.api)
         }
 
+        jvmTest.dependencies {
+            implementation(kotlin("test"))
+            implementation(libs.kotlinx.coroutines.test)
+            implementation(libs.ktor.client.mock)
+            implementation(libs.ktor.client.core)
+        }
+
         androidMain.dependencies {
             implementation(libs.sqldelight.android)
             implementation(libs.ktor.client.core)

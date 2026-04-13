@@ -130,13 +130,15 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
         ),
         instructions = """
             Назначение: курсы валют по данным Центрального банка Российской Федерации (официальные курсы ЦБ РФ).
-            Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ; инструменты не ходят в интернет при каждом запросе — они читают уже загруженные данные.
+            Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ. Инструменты get_latest_currency_rates и get_currency_summary читают уже загруженные в локальную БД данные (без сетевого запроса при каждом вызове). Инструмент get_currency_rates_on_date при вызове запрашивает дневной курс у API ЦБ на указанную календарную дату.
 
-            Когда вызывать: актуальный/последний курс по данным ЦБ (на момент последней синхронизации) — get_latest_currency_rates; динамику, среднее или сравнение за период — get_currency_summary.
+            Когда вызывать: актуальный/последний курс по данным ЦБ (на момент последней синхронизации) — get_latest_currency_rates; динамику, среднее или сравнение за период — get_currency_summary; курс на конкретную прошлую или текущую дату по календарю — get_currency_rates_on_date.
 
             Инструмент get_latest_currency_rates: последний сохранённый курс только по явно перечисленным валютам (параметр currencies обязателен, например ["USD"] или ["USD","EUR"]).
 
             Инструмент get_currency_summary: агрегаты за последние N часов. Параметр hours — окно; currencies — опционально буквенные коды как в XML ЦБ (USD, EUR, CNY); без currencies — все валюты в окне. Не передавайте русские названия валют в currencies.
+
+            Инструмент get_currency_rates_on_date: дневной курс на дату date (YYYY-MM-DD, DD.MM.YYYY или 20240601) для указанных currencies; обращается к API ЦБ при вызове.
         """.trimIndent(),
     ) {
         addTool(
@@ -253,6 +255,68 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
                     TextContent(text = text),
                 ),
             )
+        }
+
+        addTool(
+            name = "get_currency_rates_on_date",
+            description = """
+                Дневные курсы валют ЦБ РФ на указанную календарную дату для заданных кодов валют.
+                При каждом вызове выполняется запрос к API ЦБ (не чтение из локальной БД). Используйте для исторической даты или когда нужен курс именно на день из календаря.
+                Параметры: currencies (обязателен), date — YYYY-MM-DD, DD.MM.YYYY или число 20240601 в JSON.
+            """.trimIndent(),
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("currencies") {
+                        put("type", "array")
+                        put(
+                            "description",
+                            "Обязательный список кодов ISO 4217 (USD, EUR, CNY, …), минимум один код.",
+                        )
+                        put(
+                            "items",
+                            buildJsonObject {
+                                put("type", "string")
+                            },
+                        )
+                        put("minItems", 1)
+                    }
+                    putJsonObject("date") {
+                        put("type", "string")
+                        put(
+                            "description",
+                            "Дата: YYYY-MM-DD (2024-06-01), DD.MM.YYYY (01.06.2024) или строка из 8 цифр 20240601; в JSON допустимо и число 20240601.",
+                        )
+                    }
+                },
+                required = listOf("currencies", "date"),
+            ),
+            toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = true),
+        ) { request ->
+            val args = request.arguments as? JsonObject
+            when (val parsed = parseCurrencyRatesOnDateArgs(args)) {
+                is ParseCurrencyRatesOnDateResult.Failure ->
+                    CallToolResult(
+                        content = listOf(TextContent(text = parsed.message)),
+                    )
+                is ParseCurrencyRatesOnDateResult.Success -> {
+                    val currencies = parsed.currencies
+                    val date = parsed.date
+                    logger.info("Инструмент get_currency_rates_on_date: currencies={}, date={}", currencies, date)
+                    val text = try {
+                        val rates = repository.getRatesForDate(currencies, date)
+                        logger.info("get_currency_rates_on_date: записей после фильтра={}", rates.size)
+                        McpSummaryMessages.formatRatesOnDateText(date, rates)
+                    } catch (e: Exception) {
+                        logger.error("get_currency_rates_on_date: ошибка запроса к ЦБ", e)
+                        "Не удалось получить курсы на дату $date: ${e.message ?: e::class.simpleName}"
+                    }
+                    CallToolResult(
+                        content = listOf(
+                            TextContent(text = text),
+                        ),
+                    )
+                }
+            }
         }
     }
 
