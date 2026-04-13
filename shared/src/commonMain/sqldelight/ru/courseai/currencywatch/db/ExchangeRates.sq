@@ -1,0 +1,21 @@
+CREATE TABLE exchange_rate_snapshot (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  char_code TEXT NOT NULL,
+  nominal INTEGER NOT NULL,
+  value_per_unit REAL NOT NULL,
+  cbr_date TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_exchange_rate_fetched ON exchange_rate_snapshot(fetched_at);
+CREATE INDEX idx_exchange_rate_char ON exchange_rate_snapshot(char_code);
+
+insertSnapshot:
+INSERT INTO exchange_rate_snapshot(char_code, nominal, value_per_unit, cbr_date, fetched_at)
+VALUES (?, ?, ?, ?, ?);
+
+selectByTimeRange:
+SELECT *
+FROM exchange_rate_snapshot
+WHERE fetched_at >= ? AND fetched_at <= ?
+ORDER BY fetched_at ASC;
