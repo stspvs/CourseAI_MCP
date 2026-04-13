@@ -19,8 +19,10 @@ import io.ktor.utils.io.streams.asInput
 import kotlinx.io.asSink
 import kotlinx.io.buffered
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -112,12 +114,12 @@ fun main(args: Array<String>) {
     }
 
     when (config.transport) {
-        TransportMode.STDIO -> runBlocking { runMcpStdio(repository) }
-        TransportMode.HTTP -> runMcpHttp(repository, config)
+        TransportMode.STDIO -> runBlocking { runMcpStdio(repository, dataDir) }
+        TransportMode.HTTP -> runMcpHttp(repository, config, dataDir)
     }
 }
 
-private fun buildMcpServer(repository: ExchangeRateRepository): Server {
+private fun buildMcpServer(repository: ExchangeRateRepository, dataDir: File): Server {
     val server = Server(
         serverInfo = Implementation(
             name = "currency-watch",
@@ -139,6 +141,8 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
             Инструмент get_currency_summary: агрегаты за последние N часов. Параметр hours — окно; currencies — опционально буквенные коды как в XML ЦБ (USD, EUR, CNY); без currencies — все валюты в окне. Не передавайте русские названия валют в currencies.
 
             Инструмент get_currency_rates_on_date: дневной курс на дату date (YYYY-MM-DD, DD.MM.YYYY или 20240601) для указанных currencies; обращается к API ЦБ при вызове.
+
+            Инструмент save_text: сохраняет текст в файл внутри каталога данных приложения (~/.currency-watch). Параметры: path — относительный путь к файлу (например notes/memo.txt); content — текст в UTF-8; append — опционально true для дописывания в конец существующего файла, иначе файл создаётся или перезаписывается.
         """.trimIndent(),
     ) {
         addTool(
@@ -318,18 +322,92 @@ private fun buildMcpServer(repository: ExchangeRateRepository): Server {
                 }
             }
         }
+
+        addTool(
+            name = "save_text",
+            description = """
+                Сохраняет переданный текст в файл внутри каталога данных (~/.currency-watch) по относительному пути path (UTF-8).
+                Используйте для записи заметок, экспорта или отчётов на диск пользователя в разрешённой папке. Параметр append=true дописывает в конец существующего файла.
+            """.trimIndent(),
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("path") {
+                        put("type", "string")
+                        put(
+                            "description",
+                            "Относительный путь к файлу внутри каталога данных (например notes/foo.txt). Абсолютные пути и выход за пределы каталога запрещены.",
+                        )
+                    }
+                    putJsonObject("content") {
+                        put("type", "string")
+                        put("description", "Текст для записи в кодировке UTF-8.")
+                    }
+                    putJsonObject("append") {
+                        put("type", "boolean")
+                        put(
+                            "description",
+                            "Если true — дописать в конец существующего файла; если false или не указано — создать новый файл или перезаписать существующий.",
+                        )
+                    }
+                },
+                required = listOf("path", "content"),
+            ),
+            toolAnnotations = ToolAnnotations(readOnlyHint = false, openWorldHint = true),
+        ) { request ->
+            val args = request.arguments as? JsonObject
+            val pathRaw = args?.get("path")?.jsonPrimitive?.contentOrNull
+            val content = args?.get("content")?.jsonPrimitive?.contentOrNull
+            val append = (args?.get("append") as? JsonPrimitive)?.booleanOrNull ?: false
+            if (pathRaw.isNullOrBlank()) {
+                return@addTool CallToolResult(
+                    content = listOf(
+                        TextContent(text = "Укажите непустой строковый параметр path (относительный путь к файлу)."),
+                    ),
+                )
+            }
+            if (content == null) {
+                return@addTool CallToolResult(
+                    content = listOf(
+                        TextContent(text = "Укажите параметр content (текст для сохранения)."),
+                    ),
+                )
+            }
+            logger.info(
+                "Инструмент save_text: path={}, append={}, contentLength={}",
+                pathRaw,
+                append,
+                content.length,
+            )
+            when (val resolved = resolveSandboxFile(dataDir, pathRaw)) {
+                is SandboxPathResult.Err ->
+                    CallToolResult(content = listOf(TextContent(text = resolved.message)))
+                is SandboxPathResult.Ok -> {
+                    val outcome = writeSandboxUtf8(resolved.file, content, append)
+                    val text = outcome.fold(
+                        onSuccess = { o ->
+                            "Сохранено: ${o.absolutePath} (режим: ${o.modeLabel}, записано байт: ${o.bytesWritten})."
+                        },
+                        onFailure = { e ->
+                            logger.error("save_text: ошибка записи файла", e)
+                            "Не удалось записать файл: ${e.message ?: e::class.simpleName}"
+                        },
+                    )
+                    CallToolResult(content = listOf(TextContent(text = text)))
+                }
+            }
+        }
     }
 
     return server
 }
 
-private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
+private suspend fun runMcpStdio(repository: ExchangeRateRepository, dataDir: File) {
     logger.info(
         "Запуск MCP (stdio). Логи пишутся в файл {} и в stderr.",
         File(System.getProperty("user.home"), ".currency-watch/mcp-server.log").absolutePath,
     )
 
-    val server = buildMcpServer(repository)
+    val server = buildMcpServer(repository, dataDir)
 
     val transport = StdioServerTransport(
         inputStream = System.`in`.asInput(),
@@ -344,13 +422,13 @@ private suspend fun runMcpStdio(repository: ExchangeRateRepository) {
     done.join()
 }
 
-private fun runMcpHttp(repository: ExchangeRateRepository, config: LauncherConfig) {
+private fun runMcpHttp(repository: ExchangeRateRepository, config: LauncherConfig, dataDir: File) {
     val url = "http://${config.httpHost}:${config.httpPort}${normalizeHttpPath(config.httpPath)}"
     logger.info("Запуск MCP (Streamable HTTP). Подключайте клиент по адресу: {}", url)
     logger.info("Логи: {} и stderr.", File(System.getProperty("user.home"), ".currency-watch/mcp-server.log").absolutePath)
 
     embeddedServer(Netty, host = config.httpHost, port = config.httpPort) {
-        configureStreamableMcp(repository, normalizeHttpPath(config.httpPath))
+        configureStreamableMcp(repository, dataDir, normalizeHttpPath(config.httpPath))
     }.start(wait = true)
 }
 
@@ -359,7 +437,7 @@ private fun normalizeHttpPath(path: String): String {
     return if (p.startsWith("/")) p else "/$p"
 }
 
-private fun Application.configureStreamableMcp(repository: ExchangeRateRepository, path: String) {
+private fun Application.configureStreamableMcp(repository: ExchangeRateRepository, dataDir: File, path: String) {
     // ContentNegotiation + McpJson ставит сам mcpStreamableHttp() — дублировать нельзя (порядок плагинов / SSE).
     install(CORS) {
         anyHost()
@@ -374,7 +452,7 @@ private fun Application.configureStreamableMcp(repository: ExchangeRateRepositor
         exposeHeader("Mcp-Protocol-Version")
     }
     mcpStreamableHttp(path = path) {
-        buildMcpServer(repository)
+        buildMcpServer(repository, dataDir)
     }
 }
 
