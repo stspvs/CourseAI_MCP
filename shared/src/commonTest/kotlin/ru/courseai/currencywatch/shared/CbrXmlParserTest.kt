@@ -2,6 +2,7 @@ package ru.courseai.currencywatch.shared
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CbrXmlParserTest {
@@ -132,6 +133,86 @@ class CbrXmlParserTest {
         )
         val codes = CbrXmlParser.parseDailyXml(xml, 0L).map { it.charCode }.sorted()
         assertEquals(listOf("EUR", "USD"), codes)
+    }
+
+    @Test
+    fun parseDynamicXmlReadsRecordsAndMeta() {
+        val xml = """
+            <?xml version="1.0" encoding="windows-1251"?>
+            <ValCurs ID="R01235" DateRange1="02.03.2001" DateRange2="14.03.2001" name="USD">
+            <Record Date="02.03.2001">28,6200</Record>
+            <Record Date="05.03.2001">28,7000</Record>
+            </ValCurs>
+        """.trimIndent()
+        val s = CbrXmlParser.parseDynamicXml(xml)
+        requireNotNull(s)
+        assertEquals("R01235", s.valuteId)
+        assertEquals("02.03.2001", s.dateRange1)
+        assertEquals("14.03.2001", s.dateRange2)
+        assertEquals("USD", s.name)
+        assertEquals(2, s.records.size)
+        assertEquals("02.03.2001", s.records[0].recordDate)
+        assertEquals(28.62, s.records[0].valueRub, 1e-9)
+        assertEquals(28.7, s.records[1].valueRub, 1e-9)
+    }
+
+    @Test
+    fun parseDynamicXmlReadsNestedValuePerCbrCurrentFormat() {
+        val xml = """
+            <ValCurs ID="R01239" DateRange1="01.03.2025" DateRange2="31.03.2025" name="Foreign Currency Market Dynamic">
+            <Record Date="01.03.2025" Id="R01239">
+            <Nominal>1</Nominal>
+            <Value>91,5655</Value>
+            <VunitRate>91,5655</VunitRate>
+            </Record>
+            <Record Date="04.03.2025" Id="R01239">
+            <Nominal>1</Nominal>
+            <Value>92,8530</Value>
+            </Record>
+            </ValCurs>
+        """.trimIndent()
+        val s = CbrXmlParser.parseDynamicXml(xml)
+        requireNotNull(s)
+        assertEquals(2, s.records.size)
+        assertEquals(91.5655, s.records[0].valueRub, 1e-9)
+        assertEquals(92.853, s.records[1].valueRub, 1e-9)
+    }
+
+    @Test
+    fun parseDynamicXmlUsesValueOverNominalForPerUnit() {
+        val xml = """
+            <ValCurs ID="R01370" DateRange1="01.03.2026" DateRange2="05.03.2026" name="test">
+            <Record Date="03.03.2026" Id="R01370">
+            <Nominal>100</Nominal>
+            <Value>88,2534</Value>
+            <VunitRate>0,882534</VunitRate>
+            </Record>
+            </ValCurs>
+        """.trimIndent()
+        val s = requireNotNull(CbrXmlParser.parseDynamicXml(xml))
+        assertEquals(1, s.records.size)
+        assertEquals(0.882534, s.records[0].valueRub, 1e-9)
+    }
+
+    @Test
+    fun parseDynamicXmlTakesLastValueWhenDuplicatesInRecord() {
+        val xml = """
+            <ValCurs ID="R01235" DateRange1="01.03.2026" DateRange2="05.03.2026" name="x">
+            <Record Date="03.03.2026" Id="R01235">
+            <Nominal>1</Nominal>
+            <Value>75,7327</Value>
+            <Value>77,1734</Value>
+            <VunitRate>75,7327</VunitRate>
+            </Record>
+            </ValCurs>
+        """.trimIndent()
+        val s = requireNotNull(CbrXmlParser.parseDynamicXml(xml))
+        assertEquals(77.1734, s.records[0].valueRub, 1e-9)
+    }
+
+    @Test
+    fun parseDynamicXmlNullWhenNoValCurs() {
+        assertNull(CbrXmlParser.parseDynamicXml("<html></html>"))
     }
 
     @Test

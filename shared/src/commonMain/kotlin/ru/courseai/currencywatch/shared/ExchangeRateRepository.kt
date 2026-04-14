@@ -2,6 +2,7 @@ package ru.courseai.currencywatch.shared
 
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalDate
+import ru.courseai.currencywatch.shared.model.CbrDynamicSeries
 import ru.courseai.currencywatch.shared.model.CurrencySummary
 import ru.courseai.currencywatch.shared.model.ExchangeRateSnapshot
 
@@ -45,6 +46,13 @@ class ExchangeRateRepository(
         val rows = databaseHelper.selectLatestPerCurrency()
         return rows.filter { it.charCode in normalized }
     }
+
+    /**
+     * Динамика официального курса по коду валюты ЦБ (`VAL_NM_RQ`, например R01235 для USD) за интервал дат.
+     * Запрос к API ЦБ при вызове, не из локальной БД.
+     */
+    suspend fun getDynamicQuotes(valuteId: String, dateFrom: LocalDate, dateTo: LocalDate): CbrDynamicSeries? =
+        cbrRatesSource.fetchDynamicQuotes(valuteId, dateFrom, dateTo)
 
     /** Курсы на календарную дату по данным ЦБ (запрос к API источника, не из локальной БД). */
     suspend fun getRatesForDate(currencies: Set<String>, date: LocalDate): List<ExchangeRateSnapshot> {

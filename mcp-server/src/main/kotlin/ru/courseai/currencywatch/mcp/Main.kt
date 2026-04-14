@@ -132,15 +132,17 @@ private fun buildMcpServer(repository: ExchangeRateRepository, dataDir: File): S
         ),
         instructions = """
             Назначение: курсы валют по данным Центрального банка Российской Федерации (официальные курсы ЦБ РФ).
-            Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ. Инструменты get_latest_currency_rates и get_currency_summary читают уже загруженные в локальную БД данные (без сетевого запроса при каждом вызове). Инструмент get_currency_rates_on_date при вызове запрашивает дневной курс у API ЦБ на указанную календарную дату.
+            Сервер хранит историю в локальной SQLite и периодически синхронизируется с API ЦБ. Инструменты get_latest_currency_rates и get_currency_summary читают уже загруженные в локальную БД данные (без сетевого запроса при каждом вызове). Инструмент get_currency_rates_on_date при вызове запрашивает дневной курс у API ЦБ на указанную календарную дату. Инструмент get_currency_quotes_period запрашивает у ЦБ динамику официального курса одной валюты за интервал дат (XML_dynamic.asp, параметры как у веб-сервиса: val_nm_rq, date_req1/date_req2 в формате DD/MM/YYYY).
 
-            Когда вызывать: актуальный/последний курс по данным ЦБ (на момент последней синхронизации) — get_latest_currency_rates; динамику, среднее или сравнение за период — get_currency_summary; курс на конкретную прошлую или текущую дату по календарю — get_currency_rates_on_date.
+            Когда вызывать: актуальный/последний курс по данным ЦБ (на момент последней синхронизации) — get_latest_currency_rates; динамику, среднее или сравнение за период — get_currency_summary; курс на конкретную прошлую или текущую дату по календарю — get_currency_rates_on_date; показатели курса по дням за выбранный период по одной валюте (код VAL_NM_RQ как в XML ежедневного курса) — get_currency_quotes_period.
 
             Инструмент get_latest_currency_rates: последний сохранённый курс только по явно перечисленным валютам (параметр currencies обязателен, например ["USD"] или ["USD","EUR"]).
 
             Инструмент get_currency_summary: агрегаты за последние N часов. Параметр hours — окно; currencies — опционально буквенные коды как в XML ЦБ (USD, EUR, CNY); без currencies — все валюты в окне. Не передавайте русские названия валют в currencies.
 
             Инструмент get_currency_rates_on_date: дневной курс на дату date (YYYY-MM-DD, DD.MM.YYYY или 20240601) для указанных currencies; обращается к API ЦБ при вызове.
+
+            Инструмент get_currency_quotes_period: динамика курса за интервал date_from … date_to для одной валюты; val_nm_rq — код ЦБ (например R01235 для доллара США), тот же, что атрибут ID у Valute в ответе XML_daily.asp; запрос к https://www.cbr.ru/scripts/XML_dynamic.asp при каждом вызове (не из локальной БД).
 
             Инструмент save_text: сохраняет текст в файл внутри каталога данных приложения (~/.currency-watch). Параметры: path — относительный путь к файлу (например notes/memo.txt); content — текст в UTF-8; append — опционально true для дописывания в конец существующего файла, иначе файл создаётся или перезаписывается.
         """.trimIndent(),
@@ -313,6 +315,76 @@ private fun buildMcpServer(repository: ExchangeRateRepository, dataDir: File): S
                     } catch (e: Exception) {
                         logger.error("get_currency_rates_on_date: ошибка запроса к ЦБ", e)
                         "Не удалось получить курсы на дату $date: ${e.message ?: e::class.simpleName}"
+                    }
+                    CallToolResult(
+                        content = listOf(
+                            TextContent(text = text),
+                        ),
+                    )
+                }
+            }
+        }
+
+        addTool(
+            name = "get_currency_quotes_period",
+            description = """
+                Официальные котировки ЦБ РФ за календарный период для одной валюты: динамика по дням (XML_dynamic.asp).
+                Параметр val_nm_rq — числовой код валюты ЦБ (например R01235 для USD), его можно взять из ежедневного курса (атрибут ID у <Valute>). При каждом вызове выполняется запрос к API ЦБ (не чтение из локальной БД).
+            """.trimIndent(),
+            inputSchema = ToolSchema(
+                properties = buildJsonObject {
+                    putJsonObject("val_nm_rq") {
+                        put("type", "string")
+                        put(
+                            "description",
+                            "Код валюты ЦБ VAL_NM_RQ (формат R и цифры, напр. R01235 — доллар США из примеров API ЦБ).",
+                        )
+                    }
+                    putJsonObject("date_from") {
+                        put("type", "string")
+                        put(
+                            "description",
+                            "Начало периода: YYYY-MM-DD, DD.MM.YYYY или YYYYMMDD (соответствует date_req1 в запросе к ЦБ).",
+                        )
+                    }
+                    putJsonObject("date_to") {
+                        put("type", "string")
+                        put(
+                            "description",
+                            "Конец периода: YYYY-MM-DD, DD.MM.YYYY или YYYYMMDD (соответствует date_req2).",
+                        )
+                    }
+                },
+                required = listOf("val_nm_rq", "date_from", "date_to"),
+            ),
+            toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = true),
+        ) { request ->
+            val args = request.arguments as? JsonObject
+            when (val parsed = parseDynamicQuotesArgs(args)) {
+                is ParseDynamicQuotesResult.Failure ->
+                    CallToolResult(
+                        content = listOf(TextContent(text = parsed.message)),
+                    )
+                is ParseDynamicQuotesResult.Success -> {
+                    val valuteId = parsed.valuteId
+                    val from = parsed.dateFrom
+                    val to = parsed.dateTo
+                    logger.info(
+                        "Инструмент get_currency_quotes_period: val_nm_rq={}, date_from={}, date_to={}",
+                        valuteId,
+                        from,
+                        to,
+                    )
+                    val text = try {
+                        val series = repository.getDynamicQuotes(valuteId, from, to)
+                        logger.info(
+                            "get_currency_quotes_period: записей={}",
+                            series?.records?.size ?: -1,
+                        )
+                        McpSummaryMessages.formatDynamicQuotesText(from, to, series)
+                    } catch (e: Exception) {
+                        logger.error("get_currency_quotes_period: ошибка запроса к ЦБ", e)
+                        "Не удалось получить динамику курса: ${e.message ?: e::class.simpleName}"
                     }
                     CallToolResult(
                         content = listOf(

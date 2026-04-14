@@ -11,3 +11,9 @@ tasks.register("runMcp") {
     description = "Запуск JVM MCP-сервера (модуль :mcp-server). Не Android/Compose."
     dependsOn(":mcp-server:run")
 }
+
+tasks.register("runChartMcp") {
+    group = "application"
+    description = "Запуск JVM MCP-сервера графиков QuickChart (модуль :mcp-chart-server)."
+    dependsOn(":mcp-chart-server:run")
+}
