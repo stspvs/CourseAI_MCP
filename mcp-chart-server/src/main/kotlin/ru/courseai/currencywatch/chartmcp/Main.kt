@@ -94,7 +94,7 @@ private fun buildChartMcpServer(): Server {
 
             Когда вызывать build_quickchart_url:
             • пользователь просит «график», «диаграмму», «визуализировать ряд», «столбики/линия/круговая», сравнить несколько рядов по меткам оси X;
-            • нужно дать ссылку на изображение для Markdown (`![описание](url)`) или для вставки в ответ.
+            • нужна одна HTTPS-ссылка на готовое изображение диаграммы (ответ инструмента — только URL, без Markdown-обёртки).
             Не вызывать только ради текста без графика; не использовать для получения курсов ЦБ — для этого другой MCP.
 
             Параметры по смыслу: chart (обязательно) — JSON Chart.js; width/height — размер картинки; остальные — см. описания полей инструмента.
@@ -105,7 +105,7 @@ private fun buildChartMcpServer(): Server {
         addTool(
             name = "build_quickchart_url",
             description = """
-                Собирает URL изображения графика на [QuickChart](https://quickchart.io/chart): по переданному Chart.js-конфигу возвращает HTTPS-ссылку и строку Markdown `![chart](url)`.
+                Собирает URL изображения графика на [QuickChart](https://quickchart.io/chart): по переданному Chart.js-конфигу возвращает в ответе только одну строку — HTTPS URL к PNG/WebP/SVG/PDF (без префиксов, без Markdown, без дублирования).
 
                 Вызывайте, когда нужно показать график по уже известным числам: временной ряд, сравнение категорий, несколько линий/столбцов, круговая/линейная/столбчатая диаграмма. Не вызывайте, если достаточно таблицы или текста; этот инструмент не запрашивает курсы валют и не подставляет данные из внешних API — всё задаётся в `chart`.
 
@@ -168,7 +168,7 @@ private fun buildChartMcpServer(): Server {
                         put("type", "string")
                         put(
                             "description",
-                            "Что отдаёт QuickChart в ответе по этому URL: url (как сейчас) или base64 — если клиенту нужна строка base64.",
+                            "Что отдаёт QuickChart при запросе этого URL: url или base64 (параметр API QuickChart).",
                         )
                     }
                 },
@@ -214,7 +214,7 @@ private fun buildChartMcpServer(): Server {
                         encoding = encoding,
                     ),
                 )
-                "$url\n\n![chart]($url)"
+                url
             } catch (e: Exception) {
                 logger.error("build_quickchart_url: ошибка сборки URL", e)
                 "Не удалось собрать URL QuickChart: ${e.message ?: e::class.simpleName}"
